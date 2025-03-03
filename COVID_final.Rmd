@@ -1,0 +1,111 @@
+---
+title: "Covid19 Analysis"
+author: "Kyle Gagnon"
+date: "2025-02-28"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,warning = FALSE,message=FALSE)
+```
+## Introduction
+The following report will analyze the relationship between State rurality and and Covid 19 outcomes. In particular we will use the the RUCC data (https://www.ers.usda.gov/data-products/rural-urban-continuum-codes) from the USDA to calculate what percentage of each state's population that lives within a metropolitan area. Additionally we will use the Covid 19 data from CSSE at Johns Hopkins University (https://github.com/CSSEGISandData/COVID-19/tree/master) to calculate the number of cases and death per million each state had in total as of March 03, 2023, which is when the data is current to. The point of the analysis is to see if the percentage of people living in a metropolitan area had a statistically significant impact on the cases or deaths per million. 
+
+## Data Import and libraries
+```{r Imports}
+library(tidyverse)
+library(lubridate)
+library(ggplot2)
+library(reshape2)
+library(viridis)
+
+url = "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/"
+files = c("time_series_covid19_confirmed_US.csv","time_series_covid19_confirmed_global.csv",
+          "time_series_covid19_deaths_US.csv","time_series_covid19_deaths_global.csv")
+url = str_c(url,files)
+us_cases = read.csv(url[1])
+us_deaths = read.csv(url[3])
+rural = read.csv("https://ers.usda.gov/sites/default/files/_laserfiche/DataFiles/53251/Ruralurbancontinuumcodes2023.csv?v=42727")
+```
+
+## Data Cleaning and Wrangling
+```{r Tidying}
+#Removing unnecessary columns, aggregating county data into state data, removing US territories and using pivot longer to 
+#allow for later joining
+us_cases = us_cases[,c(7,12:1154)]
+us_cases = aggregate(us_cases[2:1144],list(us_cases$Province_State),FUN=sum)
+colnames(us_cases)[1] = "State"
+colnames(us_cases) = gsub("X","",colnames(us_cases))
+us_cases = us_cases[-c(3,10,14,15,40,45,53),]
+us_cases = pivot_longer(us_cases,cols=-"State",names_to = 'Date',values_to = 'Cases')
+
+#Removing unnecessary columns, aggregating county data into state data, removing US territories and using pivot longer to 
+#allow for later joining
+us_deaths = us_deaths[,c(7,12:1155)]
+us_deaths = aggregate(us_deaths[2:1145],list(us_deaths$Province_State),FUN=sum)
+colnames(us_deaths)[1] = "State"
+colnames(us_deaths) = gsub("X","",colnames(us_deaths))
+us_deaths = us_deaths[-c(3,10,14,15,40,45,53),]
+us_deaths = pivot_longer(us_deaths,cols=-c("State","Population"),names_to = 'Date',values_to = 'Deaths')
+
+#Joining cases and deaths data, calulating Cases per million and deaths per million.
+us_data = full_join(us_cases,us_deaths)
+us_data$Date = mdy(us_data$Date)
+us_data$CasesPerM = 1000000*us_data$Cases/us_data$Population
+us_data$DeathsPerM = 1000000*us_data$Deaths/us_data$Population
+
+#Unpacking data and calculating percentage of state population that lives in RUCC codes 1-3. 
+rural = rural %>% pivot_wider(names_from = "Attribute",values_from = "Value") %>% 
+  mutate(across(c(Population_2020,RUCC_2023),as.numeric))%>%
+  pivot_wider(names_from = 'RUCC_2023',values_from = "Population_2020",names_prefix = "R",values_fill=0) %>%
+  group_by(State) %>% summarize(R1 = sum(R1), R2 = sum(R2), R3 = sum(R3),R4 = sum(R4), R5 = sum(R5), R6 = sum(R6),
+  R7 = sum(R7), R8 = sum(R8), R9 = sum(R9))
+rural[,2:10] = rural[,2:10]/rowSums(rural[,2:10])
+rural$Metro = rowSums(rural[,2:4])
+
+#Removing US territories and unnecessary columns, changing state abbreviation to full name to prepare for join
+state_names <- c(
+     AL = "Alabama", AK = "Alaska", AZ = "Arizona", AR = "Arkansas", CA = "California", 
+     CO = "Colorado", CT = "Connecticut",DC = "District of Columbia", DE = "Delaware", FL = "Florida", GA = "Georgia", 
+     HI = "Hawaii", ID = "Idaho", IL = "Illinois", IN = "Indiana", IA = "Iowa", 
+     KS = "Kansas", KY = "Kentucky", LA = "Louisiana", ME = "Maine", MD = "Maryland", 
+     MA = "Massachusetts", MI = "Michigan", MN = "Minnesota", MS = "Mississippi", 
+     MO = "Missouri", MT = "Montana", NE = "Nebraska", NV = "Nevada", NH = "New Hampshire", 
+     NJ = "New Jersey", NM = "New Mexico", NY = "New York", NC = "North Carolina", 
+     ND = "North Dakota", OH = "Ohio", OK = "Oklahoma", OR = "Oregon", PA = "Pennsylvania", 
+     RI = "Rhode Island", SC = "South Carolina", SD = "South Dakota", TN = "Tennessee", 
+     TX = "Texas", UT = "Utah", VT = "Vermont", VA = "Virginia", WA = "Washington", 
+     WV = "West Virginia", WI = "Wisconsin", WY = "Wyoming")
+rural = rural[-c(4,13,28,43,51),-c(2,3,4,5,6,7,8,9,10)]
+rural$State = state_names[rural$State]
+
+#Final join and standardization of data
+us_final = full_join(us_data[us_data$Date==as.Date("2023/03/09"),],rural)
+us_final$Metro = scale(us_final$Metro)
+```
+
+## Data Visualization, Analysis, and Models.
+To start the analysis we will plot the cases and death per million against the "Metro" variable. The "Metro" variable is the standardized percentage of each state living in a RUCC code 1-3.
+```{r Visualization}
+cases_plot = ggplot(us_final,aes(Metro,CasesPerM))+geom_point()+labs(title = "Cases by Population % living in Metro")
+deaths_plot = ggplot(us_final,aes(Metro,DeathsPerM))+geom_point()+labs(title = "Deaths by Population % living in Metro")
+cases_plot
+deaths_plot
+```
+
+Neither plot suggests that there is a relationship let alone a correlation between rurality and Covid 19 outcomes by State, to confirm we will fit a linear model and plot the line of best fit.
+```{r Model Visualization}
+case_model = lm(CasesPerM~Metro,us_final)
+summary(case_model)
+cases_plot+geom_line(aes(Metro,case_model$fitted.values),col="darkblue",linewidth = 1.5)
+deaths_model = lm(DeathsPerM~Metro,us_final)
+summary(deaths_model)
+deaths_plot+geom_line(aes(Metro,deaths_model$fitted.values),col="darkblue",linewidth = 1.5)
+```
+
+As was expected both models have almost no statistical significance and almost no predictive power. While there could be a more complex relationship between the variables it is not likely that any relationship would have any significant predictive power and we are far more likely to over fit the data with a more complex model than we are to find an actual relationship. 
+
+## Conclusion and Bias
+While the analysis found no real  correlation between the percentage of a state's population living in metropolitan area and the number of Covid cases and deaths per million, there is more detailed data could be looked at to determine the relationship of the urban / rural continuum and Covid outcomes. The most obvious next step would be to analyze the data on a county level rather than a level. It would also be useful to add a deaths per cases per million feature as most of the variance in deaths per million is likely explained by the variance in cases per million. There is bias in the collection, updating, and sourcing of the data. There is bias in the choice of features used to indicate rurality and in the selection of the question. While I had pre conceived notion that more urban areas would have higher rates of cases and lower rates of deaths it was interesting to see that the analysis disproved these thoughts. 
+
+
