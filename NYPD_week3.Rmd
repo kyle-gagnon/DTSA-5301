@@ -1,0 +1,107 @@
+---
+title: "NYPD Shooting Incident Data Analysis"
+author: "Kyle Gagnon"
+date: "2025-02-26"
+output:
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,warning = FALSE,message=FALSE)
+```
+
+## Introduction
+The following report uses NYPD Shooting Incident Data (Historic) from the catalog.data.gov website (https://catalog.data.gov/dataset/nypd-shooting-incident-data-historic) to analyze on a weekly basis when most shootings occur. The data contains individual records from 2006 through the end of the previous calendar year. At the time of this writing the data is updated through the end of 2023. 
+
+
+## Data Import and Libraries
+```{r Start,attr.warning=FALSE}
+library(tidyverse)
+library(lubridate)
+library(chron)
+library(ggplot2)
+library(reshape2)
+library(viridis)
+d = read.csv("https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD")
+summary(d)
+```
+
+## Data Transformation
+This analysis will focus on the date and the time features, so we will filter the data down to those columns and then transform them into usable formats. 
+```{r}
+#Selecting Date and Time Features and transforming them to an hour of the day feature, week day name and number feature.
+data = d[,2:3]  
+data$OCCUR_DATE = mdy(data$OCCUR_DATE)
+data$WeekDay = wday(data$OCCUR_DATE,label=TRUE)
+data$OCCUR_TIME = chron(times = data$OCCUR_TIME)
+data$Hour = hours(data$OCCUR_TIME)
+data$WDNum = wday(data$OCCUR_DATE)
+
+#Creating tables of the counts table 1 includes the week day name field and table 2 swaps it for the week day number.
+table1 = table(data[,3:4])
+table2 = table(data[,4:5])
+
+#Melting and transforming to prepare for plotting. The transformation is to create a feature that is an hour code for the time of the week
+data_melted = melt(table1)
+dm2 = melt(table2)
+dm2$HourDay = dm2$Hour+(dm2$WDNum-1)*24
+dm2 = dm2[,3:4]
+```
+
+## Data Visualization
+The relationship between the incident counts and the day of the week/time is visualized using a heatmap and a bar graph below.
+```{r}
+heat_map = ggplot(data_melted, aes(WeekDay, Hour, fill = value)) +
+    geom_tile() +  
+    scale_fill_viridis() +
+    theme_minimal() +  
+    labs(title = "Heat Map of NYC Shooting Incidents",x = "Day", y = "Hour", ftaill = "Count") + 
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+bar_chart = ggplot(dm2,aes(HourDay,value)) +
+    geom_bar(stat = "identity",fill="darkred") +
+    labs(title = "Bar Graph of NYC Shooting Incidents",x = "Day / Hour", y = "Count") +
+    scale_x_continuous(breaks = seq(12, 168, by = 24),labels=c("Sun","Mon","Tue","Wed","Thu","Fri","Sat")) +
+    geom_vline(xintercept = seq(0, 168, by = 24), linetype = "solid", color = "black", linewidth = .5)
+heat_map
+bar_chart
+```
+
+## Analysis & Models
+Looking at the bar graph, it is obvious that there is a periodic nature to the relationship between the weekday/hour of the day and the number of shooting incidents. There are two natural periods: the daily cycle and the weekly cycle. Below, we will generate Fourier terms to model the incident count. Two separate models are generated from the Fourier terms: an additive model where each of the terms is treated as a feature in a linear model, and a multiplicative model where one of the Fourier features drawn from the weekly period is treated as a multiplier of the two features drawn from the daily period. Both of the summaries are reported, as well as graphs of the predicted values over the bar chart previously generated. Since the counts represent years of data, this best model is best understood as modeling the relative likelihood of an incident occurring. 
+```{r}
+#Generating fourier features for the daily period and the weekly period
+dm3 = dm2
+dm3$f = dm2$HourDay*2*pi/24
+dm3$f1 = sin(dm3$f)
+dm3$f2 = cos(dm3$f)
+dm3$ff = dm2$HourDay*2*pi/168
+dm3$f3 = sin(dm3$ff)
+dm3$f4 = cos(dm3$ff)
+
+#Creating first model (additive) and plotting predictions
+model = lm(value ~ f1 +f2+f4, data = dm3)
+dm3$preds = model$fitted.values
+
+summary(model)
+ggplot(dm3) +
+    geom_bar(stat = "identity",aes(HourDay,value),fill="darkred") +
+    geom_line(aes(HourDay,preds),col="darkblue",linewidth = 1.5)+
+    labs(title = "Bar Graph w/ Additive Model",x = "Day / Hour", y = "Count") +
+    scale_x_continuous(breaks = seq(12, 168, by = 24),labels=c("Sun","Mon","Tue","Wed","Thu","Fri","Sat")) +
+    geom_vline(xintercept = seq(0, 168, by = 24), linetype = "solid", color = "black", linewidth = .5)
+
+#Creating second modle (multiplicative) and plotting predicions
+model2 = lm(value ~ (f1 +f2)*f4, data = dm3)
+dm3$preds2 = model2$fitted.values
+
+summary(model2)
+ggplot(dm3) +
+    geom_bar(stat = "identity",aes(HourDay,value),fill="darkred") +
+    geom_line(aes(HourDay,preds2),col="darkblue",linewidth = 1.5)+
+    labs(title = "Bar Graph w/ Multiplicitive Model",x = "Day / Hour", y = "Count") +
+    scale_x_continuous(breaks = seq(12, 168, by = 24),labels=c("Sun","Mon","Tue","Wed","Thu","Fri","Sat")) +
+    geom_vline(xintercept = seq(0, 168, by = 24), linetype = "solid", color = "black", linewidth = .5)
+```
+
+## Conclusion & Bias
+Both models overall do an excellent job of modeling the data. All of the features have extremely low p-values, and the overall models have a low p-value for their F-statistic, meaning the models are statistically valid. With the adjusted R-squared being over 0.75, the model is also powerful. To actually test the model, the data should have been split into training and testing sets, but this would have added additional complications due to the time series nature of the analysis, which would have required trend modeling, which was out of the scope of the initial question. There is bias in the collection, updating, and sourcing of the data. There is bias in the choice of features to examine and the decision to use Fourier features to model the periodic pattern. While it seems well-founded, I did have the preconceived notion that more shootings would occur at night and over the weekend, which is also a source of bias that may have influenced my decision to bin the data in the manner I did. 
